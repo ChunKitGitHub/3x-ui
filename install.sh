@@ -11,6 +11,12 @@ cur_dir=$(pwd)
 xui_folder="${XUI_MAIN_FOLDER:=/usr/local/x-ui}"
 xui_service="${XUI_SERVICE:=/etc/systemd/system}"
 
+AUTO_INSTALL=0
+if [[ "${XUI_AUTO_INSTALL:-0}" == "1" || "${XUI_CHURAN_AUTO:-0}" == "1" ]]; then
+    AUTO_INSTALL=1
+    export XUI_NONINTERACTIVE="${XUI_NONINTERACTIVE:-1}"
+fi
+
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}Fatal error: ${plain} Please run this script with root privilege \n " && exit 1
 
@@ -66,6 +72,77 @@ is_domain() {
     [[ "$1" =~ ^([A-Za-z0-9](-*[A-Za-z0-9])*\.)+(xn--[a-z0-9]{2,}|[A-Za-z]{2,})$ ]] && return 0 || return 1
 }
 
+get_machine_hostname() {
+    local name="${XUI_MACHINE_NAME:-${XUI_HOSTNAME:-}}"
+    if [[ -z "${name}" ]]; then
+        if command -v curl > /dev/null 2>&1; then
+            name=$(curl -sS --connect-timeout 1 --max-time 2 \
+                -H "Metadata-Flavor: Google" \
+                "http://metadata.google.internal/computeMetadata/v1/instance/name" 2> /dev/null || true)
+        fi
+    fi
+    if [[ -z "${name}" ]]; then
+        name=$(hostname -s 2> /dev/null || hostname 2> /dev/null || cat /etc/hostname 2> /dev/null || true)
+    fi
+    name="${name%%.*}"
+    name="${name// /-}"
+    echo "${name}"
+}
+
+sanitize_dns_label() {
+    local label="$1"
+    label=$(printf '%s' "$label" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//; s/-+/-/g' \
+        | cut -c1-63 \
+        | sed -E 's/-+$//')
+    if [[ -z "${label}" ]]; then
+        label="xui-$(date +%s)"
+    fi
+    echo "${label}"
+}
+
+init_auto_install_defaults() {
+    [[ "${AUTO_INSTALL}" == "1" ]] || return 0
+
+    local machine_raw machine_label root_domain
+    machine_raw=$(get_machine_hostname)
+    machine_label="${XUI_DNS_LABEL:-$(sanitize_dns_label "${machine_raw}")}"
+    root_domain="${XUI_ROOT_DOMAIN:-${XUI_CF_ZONE_NAME:-${CF_ZONE_NAME:-${CLOUDFLARE_ZONE_NAME:-churan.xyz}}}}"
+
+    export XUI_MACHINE_NAME="${machine_label}"
+    export XUI_ROOT_DOMAIN="${root_domain}"
+    export XUI_DOMAIN="${XUI_DOMAIN:-${machine_label}.${root_domain}}"
+    export XUI_PANEL_PORT="${XUI_PANEL_PORT:-25357}"
+    export XUI_WEB_BASE_PATH="${XUI_WEB_BASE_PATH:-crnet}"
+    export XUI_SSL_MODE="${XUI_SSL_MODE:-domain}"
+    export XUI_DB_TYPE="${XUI_DB_TYPE:-sqlite}"
+    if [[ -z "${XUI_USERNAME:-}" && -n "${XUI_PANEL_USERNAME:-}" ]]; then
+        export XUI_USERNAME="${XUI_PANEL_USERNAME}"
+    fi
+    if [[ -z "${XUI_PASSWORD:-}" && -n "${XUI_PANEL_PASSWORD:-}" ]]; then
+        export XUI_PASSWORD="${XUI_PANEL_PASSWORD}"
+    fi
+    export XUI_GITHUB_BRANCH="${XUI_GITHUB_BRANCH:-main}"
+    export XUI_INBOUND_IMPORT_FILE="${XUI_INBOUND_IMPORT_FILE:-${TMPDIR:-/tmp}/x-ui-inbound.json}"
+    if [[ -z "${XUI_INBOUND_IMPORT_URL:-}" && -n "${XUI_GITHUB_REPO:-}" ]]; then
+        export XUI_INBOUND_IMPORT_URL="https://raw.githubusercontent.com/${XUI_GITHUB_REPO}/${XUI_GITHUB_BRANCH}/inbound.json"
+    fi
+    export XUI_INBOUND_REMARK="${XUI_INBOUND_REMARK:-${machine_label}}"
+    export XUI_INBOUND_PORT="${XUI_INBOUND_PORT:-63999}"
+    export XUI_INBOUND_PROTOCOL="${XUI_INBOUND_PROTOCOL:-vless}"
+    export XUI_INBOUND_SECURITY="${XUI_INBOUND_SECURITY:-reality}"
+    export XUI_SUB_ENABLE="${XUI_SUB_ENABLE:-true}"
+    export XUI_SUB_CLASH_ENABLE="${XUI_SUB_CLASH_ENABLE:-true}"
+    export XUI_SUB_PATH="${XUI_SUB_PATH:-/crnet/}"
+    export XUI_SUB_PORT="${XUI_SUB_PORT:-2096}"
+
+    echo -e "${green}Auto install mode enabled.${plain}"
+    echo -e "${green}Machine name: ${machine_label}${plain}"
+    echo -e "${green}Panel domain: ${XUI_DOMAIN}${plain}"
+    echo -e "${green}Panel URL: https://${XUI_DOMAIN}:${XUI_PANEL_PORT}/${XUI_WEB_BASE_PATH}${plain}"
+}
+
 # acme.sh's standalone server binds IPv4 by default; --listen-v6 makes it
 # v6-only, which breaks HTTP-01 validation when the domain's A record points
 # at this host's IPv4 (#4994). Only force IPv6 when the host has no global
@@ -98,29 +175,29 @@ is_port_in_use() {
 install_base() {
     case "${release}" in
         ubuntu | debian | armbian)
-            apt-get update && apt-get install -y -q cron curl tar tzdata socat ca-certificates openssl
+            apt-get update && apt-get install -y -q cron curl tar tzdata socat ca-certificates openssl jq
             ;;
         fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
-            dnf makecache -y && dnf install -y -q cronie curl tar tzdata socat ca-certificates openssl
+            dnf makecache -y && dnf install -y -q cronie curl tar tzdata socat ca-certificates openssl jq
             ;;
         centos)
             if [[ "${VERSION_ID}" =~ ^7 ]]; then
-                yum makecache -y && yum install -y cronie curl tar tzdata socat ca-certificates openssl
+                yum makecache -y && yum install -y cronie curl tar tzdata socat ca-certificates openssl jq
             else
-                dnf makecache -y && dnf install -y -q cronie curl tar tzdata socat ca-certificates openssl
+                dnf makecache -y && dnf install -y -q cronie curl tar tzdata socat ca-certificates openssl jq
             fi
             ;;
         arch | manjaro | parch)
-            pacman -Syu && pacman -Syu --noconfirm cronie curl tar tzdata socat ca-certificates openssl
+            pacman -Syu && pacman -Syu --noconfirm cronie curl tar tzdata socat ca-certificates openssl jq
             ;;
         opensuse-tumbleweed | opensuse-leap)
-            zypper refresh && zypper -q install -y cron curl tar timezone socat ca-certificates openssl
+            zypper refresh && zypper -q install -y cron curl tar timezone socat ca-certificates openssl jq
             ;;
         alpine)
-            apk update && apk add dcron curl tar tzdata socat ca-certificates openssl
+            apk update && apk add dcron curl tar tzdata socat ca-certificates openssl jq
             ;;
         *)
-            apt-get update && apt-get install -y -q cron curl tar tzdata socat ca-certificates openssl
+            apt-get update && apt-get install -y -q cron curl tar tzdata socat ca-certificates openssl jq
             ;;
     esac
 }
@@ -131,6 +208,8 @@ gen_random_string() {
         | tr -dc 'a-zA-Z0-9' \
         | head -c "$length"
 }
+
+init_auto_install_defaults
 
 # prompt_or_default VARNAME "prompt text" "default" [ENV_NAME]
 # Interactive: read into VARNAME. Non-interactive: VARNAME = ${ENV_NAME:-default}.
@@ -401,6 +480,137 @@ setup_ssl_certificate() {
         echo -e "${yellow}Certificate files not found${plain}"
         return 1
     fi
+}
+
+cloudflare_api_request() {
+    local method="$1"
+    local endpoint="$2"
+    local data="${3:-}"
+    local token="${4:-${CF_API_TOKEN:-${CLOUDFLARE_API_TOKEN:-}}}"
+
+    if [[ -n "${data}" ]]; then
+        curl -sS -X "${method}" "https://api.cloudflare.com/client/v4/${endpoint}" \
+            -H "Authorization: Bearer ${token}" \
+            -H "Content-Type: application/json" \
+            --data "${data}"
+    else
+        curl -sS -X "${method}" "https://api.cloudflare.com/client/v4/${endpoint}" \
+            -H "Authorization: Bearer ${token}" \
+            -H "Content-Type: application/json"
+    fi
+}
+
+wait_for_dns_a_record() {
+    local fqdn="$1"
+    local expected_ip="$2"
+    local timeout="${XUI_DNS_WAIT_SECONDS:-90}"
+    local start now answers
+
+    echo -e "${green}Waiting for DNS A record ${fqdn} -> ${expected_ip}...${plain}"
+    start=$(date +%s)
+    while true; do
+        answers=$(curl -sS --max-time 5 \
+            -H "accept: application/dns-json" \
+            "https://cloudflare-dns.com/dns-query?name=${fqdn}&type=A" 2> /dev/null \
+            | jq -r '.Answer[]?.data' 2> /dev/null || true)
+
+        if printf '%s\n' "${answers}" | grep -Fxq "${expected_ip}"; then
+            echo -e "${green}DNS is ready: ${fqdn} -> ${expected_ip}${plain}"
+            return 0
+        fi
+
+        now=$(date +%s)
+        if ((now - start >= timeout)); then
+            echo -e "${yellow}DNS propagation was not confirmed within ${timeout}s; continuing anyway.${plain}"
+            return 0
+        fi
+        sleep 5
+    done
+}
+
+setup_cloudflare_dns_record() {
+    local fqdn="$1"
+    local server_ip="$2"
+
+    [[ "${AUTO_INSTALL}" == "1" || "${XUI_CLOUDFLARE_DNS:-0}" == "1" ]] || return 0
+    if [[ "${XUI_SKIP_CLOUDFLARE:-0}" == "1" ]]; then
+        echo -e "${yellow}XUI_SKIP_CLOUDFLARE=1, skipping Cloudflare DNS automation.${plain}"
+        return 0
+    fi
+
+    if ! command -v jq > /dev/null 2>&1; then
+        echo -e "${red}jq is required for Cloudflare DNS automation.${plain}"
+        return 1
+    fi
+    if [[ -z "${server_ip}" || ! "${server_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${red}Cloudflare DNS automation requires a detected public IPv4 address.${plain}"
+        return 1
+    fi
+
+    local token="${CF_API_TOKEN:-${CLOUDFLARE_API_TOKEN:-}}"
+    if [[ -z "${token}" ]]; then
+        echo -e "${red}CF_API_TOKEN is required for automatic Cloudflare DNS setup.${plain}"
+        echo -e "${yellow}Create a Cloudflare API token with Zone:DNS:Edit and Zone:Zone:Read for ${XUI_ROOT_DOMAIN}.${plain}"
+        return 1
+    fi
+
+    local zone_name="${XUI_ROOT_DOMAIN:-${CF_ZONE_NAME:-${CLOUDFLARE_ZONE_NAME:-}}}"
+    local zone_id="${CF_ZONE_ID:-${CLOUDFLARE_ZONE_ID:-}}"
+    local response record_id payload proxied
+
+    if [[ -z "${zone_id}" ]]; then
+        if [[ -z "${zone_name}" ]]; then
+            echo -e "${red}Set XUI_ROOT_DOMAIN or CF_ZONE_ID for Cloudflare DNS automation.${plain}"
+            return 1
+        fi
+        response=$(cloudflare_api_request "GET" "zones?name=${zone_name}&status=active" "" "${token}")
+        if ! echo "${response}" | jq -e '.success == true and (.result | length > 0)' > /dev/null 2>&1; then
+            echo -e "${red}Could not find active Cloudflare zone: ${zone_name}${plain}"
+            echo "${response}" | jq -r '.errors[]?.message' 2> /dev/null || true
+            return 1
+        fi
+        zone_id=$(echo "${response}" | jq -r '.result[0].id')
+    fi
+
+    proxied=false
+    if [[ "${XUI_CLOUDFLARE_PROXIED:-false}" == "true" ]]; then
+        if [[ "${XUI_PANEL_PORT:-25357}" == "25357" ]]; then
+            echo -e "${yellow}Cloudflare proxy is disabled because panel port 25357 is not a supported proxied HTTPS port.${plain}"
+        else
+            proxied=true
+        fi
+    fi
+
+    response=$(cloudflare_api_request "GET" "zones/${zone_id}/dns_records?type=A&name=${fqdn}" "" "${token}")
+    if ! echo "${response}" | jq -e '.success == true' > /dev/null 2>&1; then
+        echo -e "${red}Failed to query Cloudflare DNS records for ${fqdn}.${plain}"
+        echo "${response}" | jq -r '.errors[]?.message' 2> /dev/null || true
+        return 1
+    fi
+    record_id=$(echo "${response}" | jq -r '.result[0].id // empty')
+
+    payload=$(jq -cn \
+        --arg type "A" \
+        --arg name "${fqdn}" \
+        --arg content "${server_ip}" \
+        --argjson proxied "${proxied}" \
+        '{type:$type,name:$name,content:$content,ttl:1,proxied:$proxied}')
+
+    if [[ -n "${record_id}" ]]; then
+        echo -e "${green}Updating Cloudflare A record: ${fqdn} -> ${server_ip}${plain}"
+        response=$(cloudflare_api_request "PATCH" "zones/${zone_id}/dns_records/${record_id}" "${payload}" "${token}")
+    else
+        echo -e "${green}Creating Cloudflare A record: ${fqdn} -> ${server_ip}${plain}"
+        response=$(cloudflare_api_request "POST" "zones/${zone_id}/dns_records" "${payload}" "${token}")
+    fi
+
+    if ! echo "${response}" | jq -e '.success == true' > /dev/null 2>&1; then
+        echo -e "${red}Failed to upsert Cloudflare A record for ${fqdn}.${plain}"
+        echo "${response}" | jq -r '.errors[]?.message' 2> /dev/null || true
+        return 1
+    fi
+
+    wait_for_dns_a_record "${fqdn}" "${server_ip}"
 }
 
 # Issue Let's Encrypt IP certificate with shortlived profile (~6 days validity)
@@ -816,6 +1026,12 @@ prompt_and_setup_ssl() {
         1)
             # User chose Let's Encrypt domain option
             echo -e "${green}Using Let's Encrypt for domain certificate...${plain}"
+            if [[ "${AUTO_INSTALL}" == "1" ]]; then
+                if ! setup_cloudflare_dns_record "${XUI_DOMAIN}" "${server_ip}"; then
+                    echo -e "${red}Automatic Cloudflare DNS setup failed; aborting auto install.${plain}"
+                    exit 1
+                fi
+            fi
             if ssl_cert_issue; then
                 local cert_domain="${SSL_ISSUED_DOMAIN}"
                 if [[ -z "${cert_domain}" ]]; then
@@ -831,6 +1047,10 @@ prompt_and_setup_ssl() {
                 fi
             else
                 echo -e "${red}SSL certificate setup failed for domain mode.${plain}"
+                if [[ "${AUTO_INSTALL}" == "1" ]]; then
+                    echo -e "${red}Automatic install requires a valid domain certificate; aborting.${plain}"
+                    exit 1
+                fi
                 SSL_HOST="${server_ip}"
             fi
             ;;
@@ -1007,6 +1227,13 @@ config_after_install() {
                 fi
             done
         fi
+    fi
+
+    if [[ "${AUTO_INSTALL}" == "1" && ${#existing_webBasePath} -ge 4 ]]; then
+        echo -e "${green}Auto mode: enforcing panel port ${XUI_PANEL_PORT} and web path ${XUI_WEB_BASE_PATH}.${plain}"
+        ${xui_folder}/x-ui setting -port "${XUI_PANEL_PORT}" -webBasePath "${XUI_WEB_BASE_PATH}"
+        existing_port="${XUI_PANEL_PORT}"
+        existing_webBasePath="${XUI_WEB_BASE_PATH}"
     fi
 
     if [[ ${#existing_webBasePath} -lt 4 ]]; then
@@ -1236,9 +1463,14 @@ EOF
             write_install_result "${config_username}" "${config_password}" "${config_port}" \
                 "${config_webBasePath}" "${SSL_SCHEME}" "${SSL_HOST}" "${config_apiToken}" "${db_type_out}"
         else
-            local config_webBasePath=$(gen_random_string 18)
+            local config_webBasePath="${XUI_WEB_BASE_PATH:-$(gen_random_string 18)}"
             echo -e "${yellow}WebBasePath is missing or too short. Generating a new one...${plain}"
-            ${xui_folder}/x-ui setting -webBasePath "${config_webBasePath}"
+            if [[ "${AUTO_INSTALL}" == "1" && -n "${XUI_PANEL_PORT:-}" ]]; then
+                ${xui_folder}/x-ui setting -port "${XUI_PANEL_PORT}" -webBasePath "${config_webBasePath}"
+                existing_port="${XUI_PANEL_PORT}"
+            else
+                ${xui_folder}/x-ui setting -webBasePath "${config_webBasePath}"
+            fi
             echo -e "${green}New WebBasePath: ${config_webBasePath}${plain}"
 
             # If the panel is already installed but no certificate is configured, prompt for SSL now
@@ -1297,7 +1529,336 @@ EOF
         fi
     fi
 
+    if [[ "${AUTO_INSTALL}" == "1" ]]; then
+        AUTO_PANEL_USERNAME="${AUTO_PANEL_USERNAME:-${config_username:-${XUI_USERNAME:-}}}"
+        AUTO_PANEL_PASSWORD="${AUTO_PANEL_PASSWORD:-${config_password:-${XUI_PASSWORD:-}}}"
+        AUTO_PANEL_PORT="${AUTO_PANEL_PORT:-${config_port:-${existing_port:-${XUI_PANEL_PORT:-25357}}}}"
+        AUTO_PANEL_WEB_BASE_PATH="${AUTO_PANEL_WEB_BASE_PATH:-${config_webBasePath:-${existing_webBasePath:-${XUI_WEB_BASE_PATH:-crnet}}}}"
+        AUTO_PANEL_SCHEME="${AUTO_PANEL_SCHEME:-${SSL_SCHEME:-https}}"
+        AUTO_PANEL_HOST="${AUTO_PANEL_HOST:-${SSL_HOST:-${XUI_DOMAIN:-${server_ip}}}}"
+    fi
+
     ${xui_folder}/x-ui migrate
+}
+
+json_bool() {
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+        1 | true | yes | y | on) echo "true" ;;
+        *) echo "false" ;;
+    esac
+}
+
+restart_xui_service() {
+    if [[ $release == "alpine" ]]; then
+        rc-service x-ui restart
+    else
+        systemctl restart x-ui
+    fi
+}
+
+auto_panel_base_url() {
+    local scheme="$1"
+    local port="$2"
+    local web_base_path="$3"
+    web_base_path="${web_base_path#/}"
+    web_base_path="${web_base_path%/}"
+    echo "${scheme}://127.0.0.1:${port}/${web_base_path}"
+}
+
+wait_for_panel_ready() {
+    local base_url="$1"
+    local i response
+
+    echo -e "${green}Waiting for local panel API at ${base_url}...${plain}"
+    for i in {1..40}; do
+        response=$(curl -k -sS --max-time 5 "${base_url}/csrf-token" 2> /dev/null || true)
+        if echo "${response}" | jq -e '.success == true and (.obj | type == "string")' > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+
+    echo -e "${red}Panel API did not become ready at ${base_url}.${plain}"
+    return 1
+}
+
+auto_panel_login() {
+    local base_url="$1"
+    local username="$2"
+    local password="$3"
+    local cookie_jar="$4"
+    local csrf_response login_response
+
+    csrf_response=$(curl -k -sS --max-time 10 -c "${cookie_jar}" -b "${cookie_jar}" \
+        "${base_url}/csrf-token")
+    AUTO_CSRF_TOKEN=$(echo "${csrf_response}" | jq -r '.obj // empty')
+    if [[ -z "${AUTO_CSRF_TOKEN}" ]]; then
+        echo -e "${red}Failed to get panel CSRF token.${plain}"
+        echo "${csrf_response}"
+        return 1
+    fi
+
+    login_response=$(curl -k -sS --max-time 15 -c "${cookie_jar}" -b "${cookie_jar}" \
+        -H "X-CSRF-Token: ${AUTO_CSRF_TOKEN}" \
+        -H "X-Requested-With: XMLHttpRequest" \
+        --data-urlencode "username=${username}" \
+        --data-urlencode "password=${password}" \
+        "${base_url}/login")
+
+    if ! echo "${login_response}" | jq -e '.success == true' > /dev/null 2>&1; then
+        echo -e "${red}Automatic panel login failed.${plain}"
+        echo "${login_response}"
+        return 1
+    fi
+
+    echo -e "${green}Automatic panel login succeeded.${plain}"
+    return 0
+}
+
+auto_update_subscription_settings() {
+    local base_url="$1"
+    local cookie_jar="$2"
+    local csrf_token="$3"
+    local settings_response update_response payload_file
+    local sub_enable sub_clash_enable sub_port sub_path sub_listen sub_domain sub_cert sub_key
+
+    sub_enable=$(json_bool "${XUI_SUB_ENABLE:-true}")
+    sub_clash_enable=$(json_bool "${XUI_SUB_CLASH_ENABLE:-true}")
+    sub_port="${XUI_SUB_PORT:-2096}"
+    sub_path="${XUI_SUB_PATH:-/crnet/}"
+    sub_listen="${XUI_SUB_LISTEN:-}"
+    sub_domain="${XUI_SUB_DOMAIN:-${XUI_DOMAIN:-}}"
+    sub_cert="${XUI_SUB_CERT_FILE:-}"
+    sub_key="${XUI_SUB_KEY_FILE:-}"
+
+    if [[ -z "${sub_cert}" && -n "${XUI_DOMAIN:-}" && -f "/root/cert/${XUI_DOMAIN}/fullchain.pem" ]]; then
+        sub_cert="/root/cert/${XUI_DOMAIN}/fullchain.pem"
+    fi
+    if [[ -z "${sub_key}" && -n "${XUI_DOMAIN:-}" && -f "/root/cert/${XUI_DOMAIN}/privkey.pem" ]]; then
+        sub_key="/root/cert/${XUI_DOMAIN}/privkey.pem"
+    fi
+
+    settings_response=$(curl -k -sS --max-time 15 -b "${cookie_jar}" \
+        -H "X-CSRF-Token: ${csrf_token}" \
+        -H "X-Requested-With: XMLHttpRequest" \
+        -X POST "${base_url}/panel/api/setting/all")
+    if ! echo "${settings_response}" | jq -e '.success == true and (.obj | type == "object")' > /dev/null 2>&1; then
+        echo -e "${red}Failed to read current panel settings.${plain}"
+        echo "${settings_response}"
+        return 1
+    fi
+
+    payload_file=$(mktemp 2> /dev/null) || payload_file=$(mktemp -t xui-settings.XXXXXXXX)
+    echo "${settings_response}" | jq \
+        --arg subPath "${sub_path}" \
+        --arg subListen "${sub_listen}" \
+        --arg subDomain "${sub_domain}" \
+        --arg subCertFile "${sub_cert}" \
+        --arg subKeyFile "${sub_key}" \
+        --argjson subEnable "${sub_enable}" \
+        --argjson subClashEnable "${sub_clash_enable}" \
+        --argjson subPort "${sub_port}" \
+        '.obj
+         | .subEnable = $subEnable
+         | .subClashEnable = $subClashEnable
+         | .subPath = $subPath
+         | .subPort = $subPort
+         | .subListen = $subListen
+         | .subDomain = $subDomain
+         | .subCertFile = $subCertFile
+         | .subKeyFile = $subKeyFile
+         | .subURI = ""
+         | .subClashURI = ""' > "${payload_file}"
+
+    update_response=$(curl -k -sS --max-time 20 -b "${cookie_jar}" \
+        -H "X-CSRF-Token: ${csrf_token}" \
+        -H "X-Requested-With: XMLHttpRequest" \
+        -H "Content-Type: application/json" \
+        --data-binary @"${payload_file}" \
+        "${base_url}/panel/api/setting/update")
+    rm -f "${payload_file}"
+
+    if ! echo "${update_response}" | jq -e '.success == true' > /dev/null 2>&1; then
+        echo -e "${red}Failed to update subscription settings.${plain}"
+        echo "${update_response}"
+        return 1
+    fi
+
+    echo -e "${green}Subscription settings updated: path=${sub_path}, port=${sub_port}, Clash/Mihomo=${sub_clash_enable}.${plain}"
+    return 0
+}
+
+ensure_inbound_template_file() {
+    local source_file="$1"
+    local inbound_url="${XUI_INBOUND_IMPORT_URL:-}"
+    local target_file="${source_file:-${TMPDIR:-/tmp}/x-ui-inbound.json}"
+
+    if [[ -f "${target_file}" ]]; then
+        AUTO_INBOUND_TEMPLATE_FILE="${target_file}"
+        return 0
+    fi
+
+    if [[ -z "${inbound_url}" && -n "${XUI_GITHUB_REPO:-}" ]]; then
+        inbound_url="https://raw.githubusercontent.com/${XUI_GITHUB_REPO}/${XUI_GITHUB_BRANCH:-main}/inbound.json"
+    fi
+
+    if [[ -z "${inbound_url}" ]]; then
+        echo -e "${red}Inbound template not found: ${target_file}${plain}"
+        echo -e "${yellow}Set XUI_INBOUND_IMPORT_URL or XUI_GITHUB_REPO so the installer can download inbound.json.${plain}"
+        return 1
+    fi
+
+    echo -e "${green}Downloading inbound template from ${inbound_url}.${plain}"
+    install -d -m 755 "$(dirname "${target_file}")" 2> /dev/null || true
+    if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 90 \
+        -o "${target_file}" "${inbound_url}"; then
+        echo -e "${red}Failed to download inbound template: ${inbound_url}${plain}"
+        return 1
+    fi
+
+    if ! jq . "${target_file}" > /dev/null 2>&1; then
+        echo -e "${red}Downloaded inbound template is not valid JSON: ${target_file}${plain}"
+        return 1
+    fi
+
+    AUTO_INBOUND_TEMPLATE_FILE="${target_file}"
+    return 0
+}
+
+auto_prepare_inbound_json() {
+    local source_file="$1"
+    local target_file="$2"
+    local remark="${XUI_INBOUND_REMARK:-${XUI_MACHINE_NAME:-x-ui}}"
+    local inbound_port="${XUI_INBOUND_PORT:-63999}"
+    local inbound_protocol="${XUI_INBOUND_PROTOCOL:-vless}"
+    local inbound_security="${XUI_INBOUND_SECURITY:-reality}"
+    local inbound_tag="${XUI_INBOUND_TAG:-in-${inbound_port}-tcp}"
+
+    if ! ensure_inbound_template_file "${source_file}"; then
+        return 1
+    fi
+    source_file="${AUTO_INBOUND_TEMPLATE_FILE}"
+
+    jq \
+        --arg remark "${remark}" \
+        --arg tag "${inbound_tag}" \
+        --arg protocol "${inbound_protocol}" \
+        --arg security "${inbound_security}" \
+        --argjson port "${inbound_port}" \
+        '.id = 0
+         | .remark = $remark
+         | .enable = true
+         | .port = $port
+         | .protocol = $protocol
+         | .tag = $tag
+         | .listen = (.listen // "")
+         | .total = (.total // 0)
+         | .expiryTime = (.expiryTime // 0)
+         | .trafficReset = (.trafficReset // "never")
+         | .settings = (.settings // {})
+         | .streamSettings = (.streamSettings // {})
+         | .sniffing = (.sniffing // {"enabled": false})
+         | .streamSettings.network = "tcp"
+         | .streamSettings.security = $security
+         | if ((.settings.clients | type) == "array" and (.settings.clients | length) > 0)
+           then .settings.clients[0].email = $remark | .settings.clients[0].comment = $remark
+           else .
+           end' "${source_file}" > "${target_file}"
+}
+
+auto_import_or_update_inbound() {
+    local base_url="$1"
+    local cookie_jar="$2"
+    local csrf_token="$3"
+    local source_file="${XUI_INBOUND_IMPORT_FILE:-${cur_dir}/入站.json}"
+    local prepared_file list_response response inbound_id
+    local inbound_port="${XUI_INBOUND_PORT:-63999}"
+    local inbound_tag="${XUI_INBOUND_TAG:-in-${inbound_port}-tcp}"
+
+    prepared_file=$(mktemp 2> /dev/null) || prepared_file=$(mktemp -t xui-inbound.XXXXXXXX)
+    if ! auto_prepare_inbound_json "${source_file}" "${prepared_file}"; then
+        rm -f "${prepared_file}"
+        return 1
+    fi
+
+    list_response=$(curl -k -sS --max-time 15 -b "${cookie_jar}" \
+        -H "X-Requested-With: XMLHttpRequest" \
+        "${base_url}/panel/api/inbounds/list")
+    inbound_id=$(echo "${list_response}" | jq -r \
+        --arg tag "${inbound_tag}" \
+        --argjson port "${inbound_port}" \
+        '.obj[]? | select(.tag == $tag or .port == $port) | .id' 2> /dev/null | head -n1)
+
+    if [[ -n "${inbound_id}" && "${inbound_id}" != "null" ]]; then
+        echo -e "${green}Updating existing inbound id=${inbound_id} (${inbound_tag}).${plain}"
+        response=$(curl -k -sS --max-time 20 -b "${cookie_jar}" \
+            -H "X-CSRF-Token: ${csrf_token}" \
+            -H "X-Requested-With: XMLHttpRequest" \
+            -H "Content-Type: application/json" \
+            --data-binary @"${prepared_file}" \
+            "${base_url}/panel/api/inbounds/update/${inbound_id}")
+    else
+        echo -e "${green}Importing inbound from ${source_file}.${plain}"
+        response=$(curl -k -sS --max-time 20 -b "${cookie_jar}" \
+            -H "X-CSRF-Token: ${csrf_token}" \
+            -H "X-Requested-With: XMLHttpRequest" \
+            --data-urlencode "data@${prepared_file}" \
+            "${base_url}/panel/api/inbounds/import")
+    fi
+    rm -f "${prepared_file}"
+
+    if ! echo "${response}" | jq -e '.success == true' > /dev/null 2>&1; then
+        echo -e "${red}Failed to import/update inbound.${plain}"
+        echo "${response}"
+        return 1
+    fi
+
+    echo -e "${green}Inbound ${inbound_tag} is configured on port ${inbound_port}.${plain}"
+    return 0
+}
+
+auto_post_start_config() {
+    [[ "${AUTO_INSTALL}" == "1" ]] || return 0
+
+    if [[ -z "${AUTO_PANEL_USERNAME:-}" || -z "${AUTO_PANEL_PASSWORD:-}" ]]; then
+        echo -e "${yellow}Automatic post-start configuration skipped: panel credentials are not available.${plain}"
+        return 0
+    fi
+
+    local scheme="${AUTO_PANEL_SCHEME:-${SSL_SCHEME:-https}}"
+    local port="${AUTO_PANEL_PORT:-${XUI_PANEL_PORT:-25357}}"
+    local web_base_path="${AUTO_PANEL_WEB_BASE_PATH:-${XUI_WEB_BASE_PATH:-crnet}}"
+    local base_url cookie_jar rc=0
+
+    base_url=$(auto_panel_base_url "${scheme}" "${port}" "${web_base_path}")
+    cookie_jar=$(mktemp 2> /dev/null) || cookie_jar=$(mktemp -t xui-cookie.XXXXXXXX)
+
+    if ! wait_for_panel_ready "${base_url}"; then
+        rm -f "${cookie_jar}"
+        return 1
+    fi
+    if ! auto_panel_login "${base_url}" "${AUTO_PANEL_USERNAME}" "${AUTO_PANEL_PASSWORD}" "${cookie_jar}"; then
+        rm -f "${cookie_jar}"
+        return 1
+    fi
+    if ! auto_update_subscription_settings "${base_url}" "${cookie_jar}" "${AUTO_CSRF_TOKEN}"; then
+        rc=1
+    fi
+    if ! auto_import_or_update_inbound "${base_url}" "${cookie_jar}" "${AUTO_CSRF_TOKEN}"; then
+        rc=1
+    fi
+
+    rm -f "${cookie_jar}"
+
+    if [[ "${rc}" -ne 0 ]]; then
+        echo -e "${red}Automatic post-start configuration failed.${plain}"
+        return 1
+    fi
+
+    echo -e "${green}Restarting x-ui to apply subscription listener and inbound changes...${plain}"
+    restart_xui_service
+    echo -e "${green}Automatic post-start configuration complete.${plain}"
+    return 0
 }
 
 # setup_fail2ban auto-installs and configures fail2ban for the IP Limit feature
@@ -1597,6 +2158,10 @@ install_x-ui() {
             echo -e "${red}Failed to install x-ui.service file${plain}"
             exit 1
         fi
+    fi
+
+    if [[ "${AUTO_INSTALL}" == "1" ]]; then
+        auto_post_start_config || exit 1
     fi
 
     # IP Limit relies on fail2ban; install + configure it now so the feature
