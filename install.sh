@@ -1739,6 +1739,30 @@ auto_update_subscription_settings() {
     return 0
 }
 
+auto_scan_reality_server_names_json() {
+    local base_url="$1"
+    local cookie_jar="$2"
+    local csrf_token="$3"
+    local reality_target="$4"
+    local response names_json
+
+    response=$(curl -k -sS --max-time 35 -b "${cookie_jar}" \
+        -H "X-CSRF-Token: ${csrf_token}" \
+        -H "X-Requested-With: XMLHttpRequest" \
+        "${base_url}/panel/api/server/scanRealityTargets" 2> /dev/null || true)
+
+    names_json=$(echo "${response}" | jq -c --arg target "${reality_target}" \
+        '.obj[]? | select(.target == $target and (.serverNames | type == "array") and (.serverNames | length > 0)) | .serverNames' \
+        2> /dev/null | head -n1)
+
+    if [[ -n "${names_json}" ]] && echo "${names_json}" | jq -e 'type == "array" and length > 0' > /dev/null 2>&1; then
+        printf '%s\n' "${names_json}"
+        return 0
+    fi
+
+    return 1
+}
+
 auto_generate_inbound_json() {
     local target_file="$1"
     local remark="${XUI_INBOUND_REMARK:-${XUI_MACHINE_NAME:-x-ui}}"
@@ -1748,11 +1772,21 @@ auto_generate_inbound_json() {
     local client_sub_id="${XUI_CLIENT_SUB_ID:-passwall}"
     local client_flow="${XUI_CLIENT_FLOW:-}"
     local reality_target="${XUI_REALITY_TARGET:-dl.google.com:443}"
-    local reality_server_name="${XUI_REALITY_SERVER_NAME:-dl.google.com}"
+    local default_reality_server_names="ai.android,android.com,g.co,goo.gl,www.goo.gl,google-analytics.com,google.com,googlecommerce.com,urchin.com,youtu.be,youtube.com,music.youtube.com,youtubeeducation.com,youtubekids.com,yt.be,android.clients.google.com"
+    local reality_server_names="${XUI_REALITY_SERVER_NAMES:-${XUI_REALITY_SERVER_NAME:-${default_reality_server_names}}}"
+    local reality_server_names_json="${AUTO_REALITY_SERVER_NAMES_JSON:-}"
     local reality_fingerprint="${XUI_REALITY_FINGERPRINT:-chrome}"
     local client_uuid short_id now_ms
 
     generate_reality_keypair || return 1
+    if [[ -z "${reality_server_names_json}" ]]; then
+        reality_server_names_json=$(printf '%s' "${reality_server_names}" \
+            | jq -Rsc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+    fi
+    if ! echo "${reality_server_names_json}" | jq -e 'type == "array" and length > 0' > /dev/null 2>&1; then
+        reality_server_names_json='["dl.google.com"]'
+    fi
+
     client_uuid=$(generate_uuid)
     short_id=$(openssl rand -hex 8)
     now_ms=$(date +%s%3N)
@@ -1769,7 +1803,7 @@ auto_generate_inbound_json() {
         --arg clientSubId "${client_sub_id}" \
         --arg clientFlow "${client_flow}" \
         --arg realityTarget "${reality_target}" \
-        --arg realityServerName "${reality_server_name}" \
+        --argjson realityServerNames "${reality_server_names_json}" \
         --arg realityPrivateKey "${AUTO_REALITY_PRIVATE_KEY}" \
         --arg realityPublicKey "${AUTO_REALITY_PUBLIC_KEY}" \
         --arg realityFingerprint "${reality_fingerprint}" \
@@ -1822,7 +1856,7 @@ auto_generate_inbound_json() {
                     show: false,
                     xver: 0,
                     target: $realityTarget,
-                    serverNames: [$realityServerName],
+                    serverNames: $realityServerNames,
                     privateKey: $realityPrivateKey,
                     minClientVer: "",
                     maxClientVer: "",
@@ -1851,6 +1885,7 @@ auto_import_or_update_inbound() {
     local prepared_file list_response response inbound_id
     local inbound_port="63999"
     local inbound_tag="${XUI_INBOUND_TAG:-in-${inbound_port}-tcp}"
+    local reality_target="${XUI_REALITY_TARGET:-dl.google.com:443}"
 
     list_response=$(curl -k -sS --max-time 15 -b "${cookie_jar}" \
         -H "X-Requested-With: XMLHttpRequest" \
@@ -1863,6 +1898,12 @@ auto_import_or_update_inbound() {
     if [[ -n "${inbound_id}" && "${inbound_id}" != "null" && "${XUI_FORCE_REGENERATE_INBOUND:-0}" != "1" ]]; then
         echo -e "${green}Inbound ${inbound_tag} already exists (id=${inbound_id}); keeping existing Reality keys and client.${plain}"
         return 0
+    fi
+
+    AUTO_REALITY_SERVER_NAMES_JSON=$(auto_scan_reality_server_names_json \
+        "${base_url}" "${cookie_jar}" "${csrf_token}" "${reality_target}" || true)
+    if [[ -n "${AUTO_REALITY_SERVER_NAMES_JSON}" ]]; then
+        echo -e "${green}Using Reality SNI list from panel scan API for ${reality_target}.${plain}"
     fi
 
     prepared_file=$(mktemp 2> /dev/null) || prepared_file=$(mktemp -t xui-inbound.XXXXXXXX)
