@@ -115,7 +115,6 @@ init_auto_install_defaults() {
     export XUI_DOMAIN="${XUI_DOMAIN:-${machine_label}.${root_domain}}"
     export XUI_PANEL_PORT="${XUI_PANEL_PORT:-25357}"
     export XUI_WEB_BASE_PATH="${XUI_WEB_BASE_PATH:-crnet}"
-    export XUI_SSL_MODE="${XUI_SSL_MODE:-domain}"
     export XUI_DB_TYPE="${XUI_DB_TYPE:-sqlite}"
     if [[ -z "${XUI_USERNAME:-}" && -n "${XUI_PANEL_USERNAME:-}" ]]; then
         export XUI_USERNAME="${XUI_PANEL_USERNAME}"
@@ -791,7 +790,7 @@ ssl_cert_issue() {
     if [[ "$NONINTERACTIVE" == "1" ]]; then
         domain="${XUI_DOMAIN// /}"
         if [[ -z "$domain" ]] || ! is_domain "$domain"; then
-            echo -e "${red}XUI_SSL_MODE=domain requires a valid XUI_DOMAIN (got: '${XUI_DOMAIN:-}').${plain}"
+            echo -e "${red}Domain certificate setup requires a valid XUI_DOMAIN (got: '${XUI_DOMAIN:-}').${plain}"
             return 1
         fi
     else
@@ -1001,15 +1000,7 @@ prompt_and_setup_ssl() {
     echo -e "${blue}Note:${plain} Options 1 & 2 require port 80 open. Option 3 requires manual paths."
     echo -e "${blue}Note:${plain} Option 4 serves the panel over plain HTTP — only safe behind nginx/Caddy or an SSH tunnel."
     if [[ "$NONINTERACTIVE" == "1" ]]; then
-        case "${XUI_SSL_MODE:-none}" in
-            domain) ssl_choice="1" ;;
-            ip) ssl_choice="2" ;;
-            none | "") ssl_choice="4" ;;
-            *)
-                echo -e "${yellow}Unknown XUI_SSL_MODE='${XUI_SSL_MODE}', defaulting to none (HTTP).${plain}"
-                ssl_choice="4"
-                ;;
-        esac
+        ssl_choice="1"
     else
         read -rp "Choose an option (default 2 for IP): " ssl_choice
         ssl_choice="${ssl_choice// /}" # Trim whitespace
