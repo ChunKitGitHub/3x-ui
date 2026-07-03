@@ -132,6 +132,8 @@ init_auto_install_defaults() {
     export XUI_INBOUND_PORT="${XUI_INBOUND_PORT:-63999}"
     export XUI_INBOUND_PROTOCOL="${XUI_INBOUND_PROTOCOL:-vless}"
     export XUI_INBOUND_SECURITY="${XUI_INBOUND_SECURITY:-reality}"
+    export XUI_CLIENT_EMAIL="${XUI_CLIENT_EMAIL:-passwall}"
+    export XUI_CLIENT_SUB_ID="${XUI_CLIENT_SUB_ID:-passwall}"
     export XUI_SUB_ENABLE="${XUI_SUB_ENABLE:-true}"
     export XUI_SUB_CLASH_ENABLE="${XUI_SUB_CLASH_ENABLE:-true}"
     export XUI_SUB_PATH="${XUI_SUB_PATH:-/crnet/}"
@@ -1548,6 +1550,59 @@ json_bool() {
     esac
 }
 
+xray_binary_path() {
+    local arch_name candidate
+    arch_name="$(arch)"
+    case "${arch_name}" in
+        armv5 | armv6 | armv7)
+            candidate="${xui_folder}/bin/xray-linux-arm"
+            [[ -x "${candidate}" ]] && echo "${candidate}" && return 0
+            ;;
+        *)
+            candidate="${xui_folder}/bin/xray-linux-${arch_name}"
+            [[ -x "${candidate}" ]] && echo "${candidate}" && return 0
+            ;;
+    esac
+    for candidate in "${xui_folder}/bin/xray-linux-"*; do
+        [[ -x "${candidate}" ]] && echo "${candidate}" && return 0
+    done
+    return 1
+}
+
+generate_uuid() {
+    if command -v uuidgen > /dev/null 2>&1; then
+        uuidgen | tr '[:upper:]' '[:lower:]'
+        return 0
+    fi
+    if [[ -r /proc/sys/kernel/random/uuid ]]; then
+        cat /proc/sys/kernel/random/uuid
+        return 0
+    fi
+    local hex
+    hex=$(openssl rand -hex 16)
+    printf '%s-%s-%s-%s-%s\n' \
+        "${hex:0:8}" "${hex:8:4}" "${hex:12:4}" "${hex:16:4}" "${hex:20:12}"
+}
+
+generate_reality_keypair() {
+    local xray_bin output
+    xray_bin=$(xray_binary_path) || {
+        echo -e "${red}Could not find xray binary to generate Reality key pair.${plain}" >&2
+        return 1
+    }
+
+    output=$("${xray_bin}" x25519 2>&1)
+    AUTO_REALITY_PRIVATE_KEY=$(echo "${output}" | awk -F': *' 'tolower($1) ~ /private key/ {print $2; exit}')
+    AUTO_REALITY_PUBLIC_KEY=$(echo "${output}" | awk -F': *' 'tolower($1) ~ /public key/ {print $2; exit}')
+
+    if [[ -z "${AUTO_REALITY_PRIVATE_KEY}" || -z "${AUTO_REALITY_PUBLIC_KEY}" ]]; then
+        echo -e "${red}Failed to parse Reality key pair from xray output.${plain}" >&2
+        echo "${output}" >&2
+        return 1
+    fi
+    return 0
+}
+
 restart_xui_service() {
     if [[ $release == "alpine" ]]; then
         rc-service x-ui restart
@@ -1703,8 +1758,7 @@ ensure_inbound_template_file() {
     fi
 
     if [[ -z "${inbound_url}" ]]; then
-        echo -e "${red}Inbound template not found: ${target_file}${plain}"
-        echo -e "${yellow}Set XUI_INBOUND_IMPORT_URL or XUI_GITHUB_REPO so the installer can download inbound.json.${plain}"
+        echo -e "${yellow}Inbound template not found and no remote template configured; generating VLESS + Reality inbound automatically.${plain}"
         return 1
     fi
 
@@ -1725,6 +1779,111 @@ ensure_inbound_template_file() {
     return 0
 }
 
+auto_generate_inbound_json() {
+    local target_file="$1"
+    local remark="${XUI_INBOUND_REMARK:-${XUI_MACHINE_NAME:-x-ui}}"
+    local inbound_port="${XUI_INBOUND_PORT:-63999}"
+    local inbound_tag="${XUI_INBOUND_TAG:-in-${inbound_port}-tcp}"
+    local client_email="${XUI_CLIENT_EMAIL:-passwall}"
+    local client_sub_id="${XUI_CLIENT_SUB_ID:-passwall}"
+    local client_flow="${XUI_CLIENT_FLOW:-}"
+    local reality_target="${XUI_REALITY_TARGET:-dl.google.com:443}"
+    local reality_server_name="${XUI_REALITY_SERVER_NAME:-dl.google.com}"
+    local reality_fingerprint="${XUI_REALITY_FINGERPRINT:-chrome}"
+    local client_uuid short_id now_ms
+
+    generate_reality_keypair || return 1
+    client_uuid=$(generate_uuid)
+    short_id=$(openssl rand -hex 8)
+    now_ms=$(date +%s%3N)
+    if ! [[ "${now_ms}" =~ ^[0-9]+$ ]]; then
+        now_ms="$(date +%s)000"
+    fi
+
+    jq -n \
+        --arg remark "${remark}" \
+        --arg tag "${inbound_tag}" \
+        --arg protocol "vless" \
+        --arg clientUuid "${client_uuid}" \
+        --arg clientEmail "${client_email}" \
+        --arg clientSubId "${client_sub_id}" \
+        --arg clientFlow "${client_flow}" \
+        --arg realityTarget "${reality_target}" \
+        --arg realityServerName "${reality_server_name}" \
+        --arg realityPrivateKey "${AUTO_REALITY_PRIVATE_KEY}" \
+        --arg realityPublicKey "${AUTO_REALITY_PUBLIC_KEY}" \
+        --arg realityFingerprint "${reality_fingerprint}" \
+        --arg shortId "${short_id}" \
+        --argjson port "${inbound_port}" \
+        --argjson nowMs "${now_ms}" \
+        '{
+            id: 0,
+            up: 0,
+            down: 0,
+            total: 0,
+            remark: $remark,
+            enable: true,
+            expiryTime: 0,
+            listen: "",
+            port: $port,
+            protocol: $protocol,
+            tag: $tag,
+            sniffing: {enabled: false},
+            settings: {
+                clients: [
+                    {
+                        id: $clientUuid,
+                        email: $clientEmail,
+                        flow: $clientFlow,
+                        limitIp: 0,
+                        totalGB: 0,
+                        expiryTime: 0,
+                        enable: true,
+                        tgId: 0,
+                        subId: $clientSubId,
+                        comment: $remark,
+                        reset: 0,
+                        created_at: $nowMs,
+                        updated_at: $nowMs
+                    }
+                ],
+                decryption: "none",
+                encryption: "none",
+                fallbacks: []
+            },
+            streamSettings: {
+                network: "tcp",
+                tcpSettings: {
+                    acceptProxyProtocol: false,
+                    header: {type: "none"}
+                },
+                security: "reality",
+                realitySettings: {
+                    show: false,
+                    xver: 0,
+                    target: $realityTarget,
+                    serverNames: [$realityServerName],
+                    privateKey: $realityPrivateKey,
+                    minClientVer: "",
+                    maxClientVer: "",
+                    maxTimediff: 0,
+                    shortIds: [$shortId],
+                    mldsa65Seed: "",
+                    settings: {
+                        publicKey: $realityPublicKey,
+                        fingerprint: $realityFingerprint,
+                        serverName: "",
+                        spiderX: "/",
+                        mldsa65Verify: ""
+                    }
+                }
+            }
+        }' > "${target_file}"
+
+    echo -e "${green}Generated VLESS + Reality inbound: port=${inbound_port}, client=${client_email}, subId=${client_sub_id}.${plain}"
+    return 0
+}
+
 auto_prepare_inbound_json() {
     local source_file="$1"
     local target_file="$2"
@@ -1735,7 +1894,8 @@ auto_prepare_inbound_json() {
     local inbound_tag="${XUI_INBOUND_TAG:-in-${inbound_port}-tcp}"
 
     if ! ensure_inbound_template_file "${source_file}"; then
-        return 1
+        auto_generate_inbound_json "${target_file}"
+        return $?
     fi
     source_file="${AUTO_INBOUND_TEMPLATE_FILE}"
 
@@ -1775,12 +1935,6 @@ auto_import_or_update_inbound() {
     local inbound_port="${XUI_INBOUND_PORT:-63999}"
     local inbound_tag="${XUI_INBOUND_TAG:-in-${inbound_port}-tcp}"
 
-    prepared_file=$(mktemp 2> /dev/null) || prepared_file=$(mktemp -t xui-inbound.XXXXXXXX)
-    if ! auto_prepare_inbound_json "${source_file}" "${prepared_file}"; then
-        rm -f "${prepared_file}"
-        return 1
-    fi
-
     list_response=$(curl -k -sS --max-time 15 -b "${cookie_jar}" \
         -H "X-Requested-With: XMLHttpRequest" \
         "${base_url}/panel/api/inbounds/list")
@@ -1788,6 +1942,17 @@ auto_import_or_update_inbound() {
         --arg tag "${inbound_tag}" \
         --argjson port "${inbound_port}" \
         '.obj[]? | select(.tag == $tag or .port == $port) | .id' 2> /dev/null | head -n1)
+
+    if [[ -n "${inbound_id}" && "${inbound_id}" != "null" && "${XUI_FORCE_REGENERATE_INBOUND:-0}" != "1" ]]; then
+        echo -e "${green}Inbound ${inbound_tag} already exists (id=${inbound_id}); keeping existing Reality keys and client.${plain}"
+        return 0
+    fi
+
+    prepared_file=$(mktemp 2> /dev/null) || prepared_file=$(mktemp -t xui-inbound.XXXXXXXX)
+    if ! auto_prepare_inbound_json "${source_file}" "${prepared_file}"; then
+        rm -f "${prepared_file}"
+        return 1
+    fi
 
     if [[ -n "${inbound_id}" && "${inbound_id}" != "null" ]]; then
         echo -e "${green}Updating existing inbound id=${inbound_id} (${inbound_tag}).${plain}"
