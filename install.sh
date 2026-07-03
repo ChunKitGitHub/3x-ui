@@ -1588,8 +1588,8 @@ generate_reality_keypair() {
     }
 
     output=$("${xray_bin}" x25519 2>&1)
-    AUTO_REALITY_PRIVATE_KEY=$(echo "${output}" | awk -F': *' 'tolower($1) ~ /private key/ {print $2; exit}')
-    AUTO_REALITY_PUBLIC_KEY=$(echo "${output}" | awk -F': *' 'tolower($1) ~ /public key/ {print $2; exit}')
+    AUTO_REALITY_PRIVATE_KEY=$(echo "${output}" | awk -F': *' 'tolower($1) ~ /private[[:space:]]*key/ {gsub(/^[[:space:]]+|[[:space:]\r]+$/, "", $2); print $2; exit}')
+    AUTO_REALITY_PUBLIC_KEY=$(echo "${output}" | awk -F': *' 'tolower($1) ~ /public[[:space:]]*key/ {gsub(/^[[:space:]]+|[[:space:]\r]+$/, "", $2); print $2; exit}')
 
     if [[ -z "${AUTO_REALITY_PRIVATE_KEY}" || -z "${AUTO_REALITY_PUBLIC_KEY}" ]]; then
         echo -e "${red}Failed to parse Reality key pair from xray output.${plain}" >&2
