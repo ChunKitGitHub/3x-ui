@@ -1026,8 +1026,15 @@ prompt_and_setup_ssl() {
             echo -e "${green}Using Let's Encrypt for domain certificate...${plain}"
             if [[ "${AUTO_INSTALL}" == "1" ]]; then
                 if ! setup_cloudflare_dns_record "${XUI_DOMAIN}" "${server_ip}"; then
-                    echo -e "${red}Automatic Cloudflare DNS setup failed; aborting auto install.${plain}"
-                    exit 1
+                    echo -e "${red}Automatic Cloudflare DNS setup failed.${plain}"
+                    if [[ "${XUI_REQUIRE_SSL:-0}" == "1" ]]; then
+                        echo -e "${red}XUI_REQUIRE_SSL=1, aborting auto install.${plain}"
+                        exit 1
+                    fi
+                    echo -e "${yellow}Continuing without SSL so the panel service is installed and can start.${plain}"
+                    SSL_SCHEME="http"
+                    SSL_HOST="${server_ip}"
+                    return 0
                 fi
             fi
             if ssl_cert_issue; then
@@ -1046,9 +1053,16 @@ prompt_and_setup_ssl() {
             else
                 echo -e "${red}SSL certificate setup failed for domain mode.${plain}"
                 if [[ "${AUTO_INSTALL}" == "1" ]]; then
-                    echo -e "${red}Automatic install requires a valid domain certificate; aborting.${plain}"
-                    exit 1
+                    if [[ "${XUI_REQUIRE_SSL:-0}" == "1" ]]; then
+                        echo -e "${red}XUI_REQUIRE_SSL=1, aborting auto install.${plain}"
+                        exit 1
+                    fi
+                    echo -e "${yellow}Continuing without SSL so the panel service is installed and can start.${plain}"
+                    SSL_SCHEME="http"
+                    SSL_HOST="${server_ip}"
+                    return 0
                 fi
+                SSL_SCHEME="http"
                 SSL_HOST="${server_ip}"
             fi
             ;;
@@ -1074,6 +1088,7 @@ prompt_and_setup_ssl() {
                 echo -e "${green}✓ Let's Encrypt IP certificate configured successfully${plain}"
             else
                 echo -e "${red}✗ IP certificate setup failed. Please check port 80 is open.${plain}"
+                SSL_SCHEME="http"
                 SSL_HOST="${server_ip}"
             fi
             ;;
@@ -1179,6 +1194,7 @@ prompt_and_setup_ssl() {
             ;;
         *)
             echo -e "${red}Invalid option. Skipping SSL setup.${plain}"
+            SSL_SCHEME="http"
             SSL_HOST="${server_ip}"
             ;;
     esac
