@@ -124,14 +124,10 @@ init_auto_install_defaults() {
         export XUI_PASSWORD="${XUI_PANEL_PASSWORD}"
     fi
     export XUI_GITHUB_BRANCH="${XUI_GITHUB_BRANCH:-main}"
-    export XUI_INBOUND_IMPORT_FILE="${XUI_INBOUND_IMPORT_FILE:-${TMPDIR:-/tmp}/x-ui-inbound.json}"
-    if [[ -z "${XUI_INBOUND_IMPORT_URL:-}" && -n "${XUI_GITHUB_REPO:-}" ]]; then
-        export XUI_INBOUND_IMPORT_URL="https://raw.githubusercontent.com/${XUI_GITHUB_REPO}/${XUI_GITHUB_BRANCH}/inbound.json"
-    fi
     export XUI_INBOUND_REMARK="${XUI_INBOUND_REMARK:-${machine_label}}"
-    export XUI_INBOUND_PORT="${XUI_INBOUND_PORT:-63999}"
-    export XUI_INBOUND_PROTOCOL="${XUI_INBOUND_PROTOCOL:-vless}"
-    export XUI_INBOUND_SECURITY="${XUI_INBOUND_SECURITY:-reality}"
+    export XUI_INBOUND_PORT="63999"
+    export XUI_INBOUND_PROTOCOL="vless"
+    export XUI_INBOUND_SECURITY="reality"
     export XUI_CLIENT_EMAIL="${XUI_CLIENT_EMAIL:-passwall}"
     export XUI_CLIENT_SUB_ID="${XUI_CLIENT_SUB_ID:-passwall}"
     export XUI_SUB_ENABLE="${XUI_SUB_ENABLE:-true}"
@@ -1743,46 +1739,10 @@ auto_update_subscription_settings() {
     return 0
 }
 
-ensure_inbound_template_file() {
-    local source_file="$1"
-    local inbound_url="${XUI_INBOUND_IMPORT_URL:-}"
-    local target_file="${source_file:-${TMPDIR:-/tmp}/x-ui-inbound.json}"
-
-    if [[ -f "${target_file}" ]]; then
-        AUTO_INBOUND_TEMPLATE_FILE="${target_file}"
-        return 0
-    fi
-
-    if [[ -z "${inbound_url}" && -n "${XUI_GITHUB_REPO:-}" ]]; then
-        inbound_url="https://raw.githubusercontent.com/${XUI_GITHUB_REPO}/${XUI_GITHUB_BRANCH:-main}/inbound.json"
-    fi
-
-    if [[ -z "${inbound_url}" ]]; then
-        echo -e "${yellow}Inbound template not found and no remote template configured; generating VLESS + Reality inbound automatically.${plain}"
-        return 1
-    fi
-
-    echo -e "${green}Downloading inbound template from ${inbound_url}.${plain}"
-    install -d -m 755 "$(dirname "${target_file}")" 2> /dev/null || true
-    if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 90 \
-        -o "${target_file}" "${inbound_url}"; then
-        echo -e "${red}Failed to download inbound template: ${inbound_url}${plain}"
-        return 1
-    fi
-
-    if ! jq . "${target_file}" > /dev/null 2>&1; then
-        echo -e "${red}Downloaded inbound template is not valid JSON: ${target_file}${plain}"
-        return 1
-    fi
-
-    AUTO_INBOUND_TEMPLATE_FILE="${target_file}"
-    return 0
-}
-
 auto_generate_inbound_json() {
     local target_file="$1"
     local remark="${XUI_INBOUND_REMARK:-${XUI_MACHINE_NAME:-x-ui}}"
-    local inbound_port="${XUI_INBOUND_PORT:-63999}"
+    local inbound_port="63999"
     local inbound_tag="${XUI_INBOUND_TAG:-in-${inbound_port}-tcp}"
     local client_email="${XUI_CLIENT_EMAIL:-passwall}"
     local client_sub_id="${XUI_CLIENT_SUB_ID:-passwall}"
@@ -1884,55 +1844,12 @@ auto_generate_inbound_json() {
     return 0
 }
 
-auto_prepare_inbound_json() {
-    local source_file="$1"
-    local target_file="$2"
-    local remark="${XUI_INBOUND_REMARK:-${XUI_MACHINE_NAME:-x-ui}}"
-    local inbound_port="${XUI_INBOUND_PORT:-63999}"
-    local inbound_protocol="${XUI_INBOUND_PROTOCOL:-vless}"
-    local inbound_security="${XUI_INBOUND_SECURITY:-reality}"
-    local inbound_tag="${XUI_INBOUND_TAG:-in-${inbound_port}-tcp}"
-
-    if ! ensure_inbound_template_file "${source_file}"; then
-        auto_generate_inbound_json "${target_file}"
-        return $?
-    fi
-    source_file="${AUTO_INBOUND_TEMPLATE_FILE}"
-
-    jq \
-        --arg remark "${remark}" \
-        --arg tag "${inbound_tag}" \
-        --arg protocol "${inbound_protocol}" \
-        --arg security "${inbound_security}" \
-        --argjson port "${inbound_port}" \
-        '.id = 0
-         | .remark = $remark
-         | .enable = true
-         | .port = $port
-         | .protocol = $protocol
-         | .tag = $tag
-         | .listen = (.listen // "")
-         | .total = (.total // 0)
-         | .expiryTime = (.expiryTime // 0)
-         | .trafficReset = (.trafficReset // "never")
-         | .settings = (.settings // {})
-         | .streamSettings = (.streamSettings // {})
-         | .sniffing = (.sniffing // {"enabled": false})
-         | .streamSettings.network = "tcp"
-         | .streamSettings.security = $security
-         | if ((.settings.clients | type) == "array" and (.settings.clients | length) > 0)
-           then .settings.clients[0].email = $remark | .settings.clients[0].comment = $remark
-           else .
-           end' "${source_file}" > "${target_file}"
-}
-
 auto_import_or_update_inbound() {
     local base_url="$1"
     local cookie_jar="$2"
     local csrf_token="$3"
-    local source_file="${XUI_INBOUND_IMPORT_FILE:-${cur_dir}/入站.json}"
     local prepared_file list_response response inbound_id
-    local inbound_port="${XUI_INBOUND_PORT:-63999}"
+    local inbound_port="63999"
     local inbound_tag="${XUI_INBOUND_TAG:-in-${inbound_port}-tcp}"
 
     list_response=$(curl -k -sS --max-time 15 -b "${cookie_jar}" \
@@ -1949,7 +1866,7 @@ auto_import_or_update_inbound() {
     fi
 
     prepared_file=$(mktemp 2> /dev/null) || prepared_file=$(mktemp -t xui-inbound.XXXXXXXX)
-    if ! auto_prepare_inbound_json "${source_file}" "${prepared_file}"; then
+    if ! auto_generate_inbound_json "${prepared_file}"; then
         rm -f "${prepared_file}"
         return 1
     fi
@@ -1963,7 +1880,7 @@ auto_import_or_update_inbound() {
             --data-binary @"${prepared_file}" \
             "${base_url}/panel/api/inbounds/update/${inbound_id}")
     else
-        echo -e "${green}Importing inbound from ${source_file}.${plain}"
+        echo -e "${green}Importing generated VLESS + Reality inbound.${plain}"
         response=$(curl -k -sS --max-time 20 -b "${cookie_jar}" \
             -H "X-CSRF-Token: ${csrf_token}" \
             -H "X-Requested-With: XMLHttpRequest" \
