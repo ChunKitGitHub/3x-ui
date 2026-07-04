@@ -1757,7 +1757,7 @@ auto_scan_reality_server_names_json() {
     return 1
 }
 
-auto_generate_inbound_json() {
+auto_generate_inbound_payload() {
     local target_file="$1"
     local remark="${XUI_INBOUND_REMARK:-${XUI_MACHINE_NAME:-x-ui}}"
     local inbound_port="63999"
@@ -1901,7 +1901,7 @@ auto_import_or_update_inbound() {
     fi
 
     prepared_file=$(mktemp 2> /dev/null) || prepared_file=$(mktemp -t xui-inbound.XXXXXXXX)
-    if ! auto_generate_inbound_json "${prepared_file}"; then
+    if ! auto_generate_inbound_payload "${prepared_file}"; then
         rm -f "${prepared_file}"
         return 1
     fi
