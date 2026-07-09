@@ -996,6 +996,41 @@ ssl_cert_issue() {
 
 # Reusable interactive SSL setup (domain or IP)
 # Sets global `SSL_HOST` to the chosen domain/IP for Access URL usage
+validate_reusable_cert_files() {
+    local cert_file="$1"
+    local key_file="$2"
+    local cert_pub key_pub
+
+    if [[ ! -s "${cert_file}" ]]; then
+        echo -e "${red}Reusable certificate file not found or empty: ${cert_file}${plain}"
+        return 1
+    fi
+    if [[ ! -s "${key_file}" ]]; then
+        echo -e "${red}Reusable private key file not found or empty: ${key_file}${plain}"
+        return 1
+    fi
+    if ! openssl x509 -in "${cert_file}" -noout > /dev/null 2>&1; then
+        echo -e "${red}Reusable certificate is not a valid PEM certificate: ${cert_file}${plain}"
+        return 1
+    fi
+    if ! openssl pkey -in "${key_file}" -noout > /dev/null 2>&1; then
+        echo -e "${red}Reusable private key is not a valid PEM private key: ${key_file}${plain}"
+        echo -e "${yellow}Secret Manager xui-gcp-privkey must start with BEGIN ... PRIVATE KEY, not BEGIN CERTIFICATE.${plain}"
+        return 1
+    fi
+
+    cert_pub=$(mktemp 2> /dev/null) || cert_pub=$(mktemp -t xui-cert-pub.XXXXXXXX)
+    key_pub=$(mktemp 2> /dev/null) || key_pub=$(mktemp -t xui-key-pub.XXXXXXXX)
+    if ! openssl x509 -in "${cert_file}" -pubkey -noout > "${cert_pub}" 2> /dev/null ||
+        ! openssl pkey -in "${key_file}" -pubout > "${key_pub}" 2> /dev/null ||
+        ! cmp -s "${cert_pub}" "${key_pub}"; then
+        rm -f "${cert_pub}" "${key_pub}"
+        echo -e "${red}Reusable certificate and private key do not match.${plain}"
+        return 1
+    fi
+    rm -f "${cert_pub}" "${key_pub}"
+}
+
 setup_reused_ssl_certificate() {
     local cert_file="${XUI_CERT_FULLCHAIN:-}"
     local key_file="${XUI_CERT_KEY:-}"
@@ -1005,12 +1040,7 @@ setup_reused_ssl_certificate() {
         echo -e "${red}XUI_CERT_MODE=reuse requires XUI_CERT_FULLCHAIN and XUI_CERT_KEY.${plain}"
         return 1
     fi
-    if [[ ! -s "${cert_file}" ]]; then
-        echo -e "${red}Reusable certificate file not found or empty: ${cert_file}${plain}"
-        return 1
-    fi
-    if [[ ! -s "${key_file}" ]]; then
-        echo -e "${red}Reusable private key file not found or empty: ${key_file}${plain}"
+    if ! validate_reusable_cert_files "${cert_file}" "${key_file}"; then
         return 1
     fi
 
@@ -2034,6 +2064,11 @@ auto_import_or_update_inbound() {
     fi
 
     if [[ -n "${inbound_id}" && "${inbound_id}" != "null" ]]; then
+        local update_file
+        update_file=$(mktemp 2> /dev/null) || update_file=$(mktemp -t xui-inbound-update.XXXXXXXX)
+        jq --argjson id "${inbound_id}" '.id = $id' "${prepared_file}" > "${update_file}"
+        mv "${update_file}" "${prepared_file}"
+
         echo -e "${green}Updating existing inbound id=${inbound_id} (${inbound_tag}).${plain}"
         response=$(curl -k -sS --max-time 20 -b "${cookie_jar}" \
             -H "X-CSRF-Token: ${csrf_token}" \
@@ -2102,7 +2137,7 @@ auto_post_start_config() {
         return 1
     fi
     if ! auto_update_subscription_settings "${base_url}" "${cookie_jar}" "${AUTO_CSRF_TOKEN}"; then
-        rc=1
+        echo -e "${yellow}Subscription settings failed; continuing so the inbound and client stay installed.${plain}"
     fi
     if ! auto_import_or_update_inbound "${base_url}" "${cookie_jar}" "${AUTO_CSRF_TOKEN}"; then
         rc=1
