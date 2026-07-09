@@ -1941,13 +1941,11 @@ auto_generate_inbound_payload() {
                     maxClientVer: "",
                     maxTimediff: 0,
                     shortIds: [$shortId],
-                    mldsa65Seed: "",
                     settings: {
                         publicKey: $realityPublicKey,
                         fingerprint: $realityFingerprint,
                         serverName: "",
-                        spiderX: "/",
-                        mldsa65Verify: ""
+                        spiderX: "/"
                     }
                 }
             }
@@ -2000,12 +1998,13 @@ auto_import_or_update_inbound() {
             --data-binary @"${prepared_file}" \
             "${base_url}/panel/api/inbounds/update/${inbound_id}")
     else
-        echo -e "${green}Importing generated VLESS + Reality inbound.${plain}"
+        echo -e "${green}Creating generated VLESS + Reality inbound.${plain}"
         response=$(curl -k -sS --max-time 20 -b "${cookie_jar}" \
             -H "X-CSRF-Token: ${csrf_token}" \
             -H "X-Requested-With: XMLHttpRequest" \
-            --data-urlencode "data@${prepared_file}" \
-            "${base_url}/panel/api/inbounds/import")
+            -H "Content-Type: application/json" \
+            --data-binary @"${prepared_file}" \
+            "${base_url}/panel/api/inbounds/add")
     fi
     rm -f "${prepared_file}"
 
