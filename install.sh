@@ -1682,15 +1682,20 @@ auto_panel_base_url() {
     local web_base_path="$3"
     web_base_path="${web_base_path#/}"
     web_base_path="${web_base_path%/}"
-    echo "${scheme}://127.0.0.1:${port}/${web_base_path}"
+    if [[ -n "${web_base_path}" ]]; then
+        echo "${scheme}://127.0.0.1:${port}/${web_base_path}"
+    else
+        echo "${scheme}://127.0.0.1:${port}"
+    fi
 }
 
 wait_for_panel_ready() {
     local base_url="$1"
     local i response
+    base_url="${base_url%/}"
 
     echo -e "${green}Waiting for local panel API at ${base_url}...${plain}"
-    for i in {1..40}; do
+    for i in {1..90}; do
         response=$(curl -k -sS --max-time 5 "${base_url}/csrf-token" 2> /dev/null || true)
         if echo "${response}" | jq -e '.success == true and (.obj | type == "string")' > /dev/null 2>&1; then
             return 0
@@ -1700,6 +1705,45 @@ wait_for_panel_ready() {
 
     echo -e "${red}Panel API did not become ready at ${base_url}.${plain}"
     return 1
+}
+
+wait_for_any_panel_ready() {
+    local urls=("$@")
+    local i base_url response
+
+    echo -e "${green}Waiting for local panel API...${plain}"
+    for i in {1..120}; do
+        for base_url in "${urls[@]}"; do
+            [[ -n "${base_url}" ]] || continue
+            base_url="${base_url%/}"
+            response=$(curl -k -sS --max-time 3 "${base_url}/csrf-token" 2> /dev/null || true)
+            if echo "${response}" | jq -e '.success == true and (.obj | type == "string")' > /dev/null 2>&1; then
+                AUTO_READY_BASE_URL="${base_url}"
+                return 0
+            fi
+        done
+        sleep 2
+        if ((i % 15 == 0)); then
+            echo -e "${yellow}Still waiting for local panel API after $((i * 2))s...${plain}"
+        fi
+    done
+
+    echo -e "${red}Panel API did not become ready on any local candidate URL.${plain}"
+    printf '  %s\n' "${urls[@]}"
+    return 1
+}
+
+print_xui_diagnostics() {
+    echo -e "${yellow}x-ui diagnostics:${plain}"
+    if command -v systemctl > /dev/null 2>&1; then
+        systemctl --no-pager --full status x-ui 2>&1 || true
+    fi
+    if command -v journalctl > /dev/null 2>&1; then
+        journalctl -u x-ui --no-pager -n 120 2>&1 || true
+    fi
+    if command -v ss > /dev/null 2>&1; then
+        ss -ltnp 2>&1 | grep -E ':25357|:2096|:63999' || true
+    fi
 }
 
 auto_panel_login() {
@@ -2029,16 +2073,31 @@ auto_post_start_config() {
     local scheme="${AUTO_PANEL_SCHEME:-${SSL_SCHEME:-https}}"
     local port="${AUTO_PANEL_PORT:-${XUI_PANEL_PORT:-25357}}"
     local web_base_path="${AUTO_PANEL_WEB_BASE_PATH:-${XUI_WEB_BASE_PATH:-crnet}}"
-    local base_url cookie_jar rc=0
+    local base_url fallback_scheme fallback_base_url root_base_url fallback_root_base_url cookie_jar rc=0
 
     base_url=$(auto_panel_base_url "${scheme}" "${port}" "${web_base_path}")
+    if [[ "${scheme}" == "https" ]]; then
+        fallback_scheme="http"
+    else
+        fallback_scheme="https"
+    fi
+    fallback_base_url=$(auto_panel_base_url "${fallback_scheme}" "${port}" "${web_base_path}")
+    root_base_url=$(auto_panel_base_url "${scheme}" "${port}" "")
+    fallback_root_base_url=$(auto_panel_base_url "${fallback_scheme}" "${port}" "")
     cookie_jar=$(mktemp 2> /dev/null) || cookie_jar=$(mktemp -t xui-cookie.XXXXXXXX)
 
-    if ! wait_for_panel_ready "${base_url}"; then
+    restart_xui_service || true
+
+    if ! wait_for_any_panel_ready "${base_url}" "${fallback_base_url}" "${root_base_url}" "${fallback_root_base_url}"; then
+        print_xui_diagnostics
         rm -f "${cookie_jar}"
         return 1
     fi
+    base_url="${AUTO_READY_BASE_URL}"
+    echo -e "${green}Using local panel API at ${base_url}.${plain}"
+
     if ! auto_panel_login "${base_url}" "${AUTO_PANEL_USERNAME}" "${AUTO_PANEL_PASSWORD}" "${cookie_jar}"; then
+        print_xui_diagnostics
         rm -f "${cookie_jar}"
         return 1
     fi
