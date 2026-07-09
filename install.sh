@@ -1644,6 +1644,13 @@ generate_uuid() {
 
 generate_reality_keypair() {
     local xray_bin output
+    if [[ -n "${XUI_REALITY_PRIVATE_KEY:-}" && -n "${XUI_REALITY_PUBLIC_KEY:-}" ]]; then
+        AUTO_REALITY_PRIVATE_KEY="${XUI_REALITY_PRIVATE_KEY}"
+        AUTO_REALITY_PUBLIC_KEY="${XUI_REALITY_PUBLIC_KEY}"
+        echo -e "${green}Using fixed Reality key pair from environment.${plain}"
+        return 0
+    fi
+
     xray_bin=$(xray_binary_path) || {
         echo -e "${red}Could not find xray binary to generate Reality key pair.${plain}" >&2
         return 1
@@ -1828,7 +1835,7 @@ auto_scan_reality_server_names_json() {
 auto_generate_inbound_payload() {
     local target_file="$1"
     local remark="${XUI_INBOUND_REMARK:-${XUI_MACHINE_NAME:-x-ui}}"
-    local inbound_port="63999"
+    local inbound_port="${XUI_INBOUND_PORT:-63999}"
     local inbound_tag="${XUI_INBOUND_TAG:-in-${inbound_port}-tcp}"
     local client_email="${XUI_CLIENT_EMAIL:-gcp-${XUI_MACHINE_NAME:-x-ui}}"
     local client_sub_id="${XUI_CLIENT_SUB_ID:-gcp-${XUI_MACHINE_NAME:-x-ui}}"
@@ -1849,8 +1856,18 @@ auto_generate_inbound_payload() {
         reality_server_names_json='["dl.google.com"]'
     fi
 
-    client_uuid=$(generate_uuid)
-    short_id=$(openssl rand -hex 8)
+    client_uuid="${XUI_CLIENT_UUID:-}"
+    if [[ -z "${client_uuid}" ]]; then
+        client_uuid=$(generate_uuid)
+    else
+        echo -e "${green}Using fixed client UUID from environment.${plain}"
+    fi
+    short_id="${XUI_REALITY_SHORT_ID:-${XUI_SHORT_ID:-}}"
+    if [[ -z "${short_id}" ]]; then
+        short_id=$(openssl rand -hex 8)
+    else
+        echo -e "${green}Using fixed Reality shortId from environment.${plain}"
+    fi
     now_ms=$(date +%s%3N)
     if ! [[ "${now_ms}" =~ ^[0-9]+$ ]]; then
         now_ms="$(date +%s)000"
@@ -1945,7 +1962,7 @@ auto_import_or_update_inbound() {
     local cookie_jar="$2"
     local csrf_token="$3"
     local prepared_file list_response response inbound_id
-    local inbound_port="63999"
+    local inbound_port="${XUI_INBOUND_PORT:-63999}"
     local inbound_tag="${XUI_INBOUND_TAG:-in-${inbound_port}-tcp}"
     local reality_target="${XUI_REALITY_TARGET:-dl.google.com:443}"
 
