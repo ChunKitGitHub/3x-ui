@@ -108,7 +108,12 @@ init_auto_install_defaults() {
     local machine_raw machine_label root_domain
     machine_raw=$(get_machine_hostname)
     machine_label="${XUI_DNS_LABEL:-$(sanitize_dns_label "${machine_raw}")}"
-    root_domain="${XUI_ROOT_DOMAIN:-${XUI_CF_ZONE_NAME:-${CF_ZONE_NAME:-${CLOUDFLARE_ZONE_NAME:-churan.xyz}}}}"
+    if [[ "${XUI_CERT_MODE:-}" == "reuse" ]]; then
+        root_domain="${XUI_ROOT_DOMAIN:-${XUI_CERT_DOMAIN:-gcp.churan.xyz}}"
+        export XUI_CF_ZONE_NAME="${XUI_CF_ZONE_NAME:-${CF_ZONE_NAME:-${CLOUDFLARE_ZONE_NAME:-churan.xyz}}}"
+    else
+        root_domain="${XUI_ROOT_DOMAIN:-${XUI_CF_ZONE_NAME:-${CF_ZONE_NAME:-${CLOUDFLARE_ZONE_NAME:-churan.xyz}}}}"
+    fi
 
     export XUI_MACHINE_NAME="${machine_label}"
     export XUI_ROOT_DOMAIN="${root_domain}"
@@ -133,6 +138,13 @@ init_auto_install_defaults() {
     export XUI_SUB_CLASH_ENABLE="${XUI_SUB_CLASH_ENABLE:-true}"
     export XUI_SUB_PATH="${XUI_SUB_PATH:-/crnet/}"
     export XUI_SUB_PORT="${XUI_SUB_PORT:-2096}"
+    if [[ "${XUI_CERT_MODE:-}" == "reuse" ]]; then
+        export XUI_CERT_DOMAIN="${XUI_CERT_DOMAIN:-gcp.churan.xyz}"
+        export XUI_CERT_FULLCHAIN="${XUI_CERT_FULLCHAIN:-/root/cert/${XUI_CERT_DOMAIN}/fullchain.pem}"
+        export XUI_CERT_KEY="${XUI_CERT_KEY:-/root/cert/${XUI_CERT_DOMAIN}/privkey.pem}"
+        export XUI_SUB_CERT_FILE="${XUI_SUB_CERT_FILE:-${XUI_CERT_FULLCHAIN}}"
+        export XUI_SUB_KEY_FILE="${XUI_SUB_KEY_FILE:-${XUI_CERT_KEY}}"
+    fi
 
     echo -e "${green}Auto install mode enabled.${plain}"
     echo -e "${green}Machine name: ${machine_label}${plain}"
@@ -544,14 +556,14 @@ setup_cloudflare_dns_record() {
         return 1
     fi
 
+    local zone_name="${CF_ZONE_NAME:-${CLOUDFLARE_ZONE_NAME:-${XUI_CF_ZONE_NAME:-${XUI_ROOT_DOMAIN:-}}}}"
     local token="${CF_API_TOKEN:-${CLOUDFLARE_API_TOKEN:-}}"
     if [[ -z "${token}" ]]; then
         echo -e "${red}CF_API_TOKEN is required for automatic Cloudflare DNS setup.${plain}"
-        echo -e "${yellow}Create a Cloudflare API token with Zone:DNS:Edit and Zone:Zone:Read for ${XUI_ROOT_DOMAIN}.${plain}"
+        echo -e "${yellow}Create a Cloudflare API token with Zone:DNS:Edit and Zone:Zone:Read for ${zone_name}.${plain}"
         return 1
     fi
 
-    local zone_name="${XUI_ROOT_DOMAIN:-${CF_ZONE_NAME:-${CLOUDFLARE_ZONE_NAME:-}}}"
     local zone_id="${CF_ZONE_ID:-${CLOUDFLARE_ZONE_ID:-}}"
     local response record_id payload proxied
 
@@ -984,6 +996,42 @@ ssl_cert_issue() {
 
 # Reusable interactive SSL setup (domain or IP)
 # Sets global `SSL_HOST` to the chosen domain/IP for Access URL usage
+setup_reused_ssl_certificate() {
+    local cert_file="${XUI_CERT_FULLCHAIN:-}"
+    local key_file="${XUI_CERT_KEY:-}"
+    local cert_domain="${XUI_CERT_DOMAIN:-${XUI_DOMAIN:-}}"
+
+    if [[ -z "${cert_file}" || -z "${key_file}" ]]; then
+        echo -e "${red}XUI_CERT_MODE=reuse requires XUI_CERT_FULLCHAIN and XUI_CERT_KEY.${plain}"
+        return 1
+    fi
+    if [[ ! -s "${cert_file}" ]]; then
+        echo -e "${red}Reusable certificate file not found or empty: ${cert_file}${plain}"
+        return 1
+    fi
+    if [[ ! -s "${key_file}" ]]; then
+        echo -e "${red}Reusable private key file not found or empty: ${key_file}${plain}"
+        return 1
+    fi
+
+    chmod 600 "${key_file}" 2> /dev/null || true
+    chmod 644 "${cert_file}" 2> /dev/null || true
+
+    echo -e "${green}Using reusable SSL certificate: ${cert_file}${plain}"
+    ${xui_folder}/x-ui cert -webCert "${cert_file}" -webCertKey "${key_file}" > /dev/null 2>&1
+    if [[ $? -ne 0 ]]; then
+        echo -e "${red}Failed to configure x-ui with reusable certificate.${plain}"
+        return 1
+    fi
+
+    SSL_SCHEME="https"
+    SSL_HOST="${XUI_DOMAIN:-${cert_domain}}"
+    echo -e "${green}Reusable SSL certificate configured successfully.${plain}"
+    echo -e "${green}Certificate File: ${cert_file}${plain}"
+    echo -e "${green}Private Key File: ${key_file}${plain}"
+    return 0
+}
+
 prompt_and_setup_ssl() {
     local panel_port="$1"
     local web_base_path="$2"
@@ -991,6 +1039,26 @@ prompt_and_setup_ssl() {
 
     local ssl_choice=""
     SSL_SCHEME="https"
+
+    if [[ "${XUI_CERT_MODE:-}" == "reuse" ]]; then
+        echo -e "${green}XUI_CERT_MODE=reuse enabled; skipping ACME issuance.${plain}"
+        if [[ "${AUTO_INSTALL}" == "1" ]]; then
+            if ! setup_cloudflare_dns_record "${XUI_DOMAIN}" "${server_ip}"; then
+                echo -e "${red}Automatic Cloudflare DNS setup failed; aborting auto install.${plain}"
+                exit 1
+            fi
+        fi
+        if setup_reused_ssl_certificate; then
+            return 0
+        fi
+        if [[ "${AUTO_INSTALL}" == "1" ]]; then
+            echo -e "${red}Automatic install requires reusable certificate files; aborting.${plain}"
+            exit 1
+        fi
+        SSL_SCHEME="http"
+        SSL_HOST="${server_ip}"
+        return 1
+    fi
 
     echo -e "${yellow}Choose SSL certificate setup method:${plain}"
     echo -e "${green}1.${plain} Let's Encrypt for Domain (90-day validity, auto-renews)"
